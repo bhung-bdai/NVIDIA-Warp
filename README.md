@@ -271,6 +271,12 @@ This will generate the `warp.dll` / `warp.so` core library respectively. It will
 
 This ensures that subsequent modifications to the library will be reflected in the Python package.
 
+
+### Creating a wheel
+If you want to build the library into a wheel, you can instead call (from this directory):
+
+    ./build_whl.sh
+
 ## Learn More
 
 Please see the following resources for additional background on Warp:
