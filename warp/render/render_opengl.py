@@ -1,3 +1,4 @@
+# Copyright (c) 2024 Boston Dynamics AI Institute LLC. All rights reserved.
 # Copyright (c) 2022 NVIDIA CORPORATION.  All rights reserved.
 # NVIDIA CORPORATION and its licensors retain all intellectual property
 # and proprietary rights in and to this software, related documentation
@@ -12,10 +13,7 @@ from collections import defaultdict
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
-
 import warp as wp
-
-from .utils import tab10_color_map
 
 Mat44 = Union[List[float], List[List[float]], np.ndarray]
 
@@ -77,7 +75,7 @@ uniform vec3 sunDirection;
 
 void main()
 {
-    float ambientStrength = 0.3;
+    /* float ambientStrength = 0.3;
     vec3 ambient = ambientStrength * lightColor;
     vec3 norm = normalize(Normal);
 
@@ -114,6 +112,45 @@ void main()
 
     vec3 result = (ambient + diffuse + specular) * checkerColor;
     FragColor = vec4(result, 1.0);
+    */
+    FragColor = vec4(ObjectColor1, 1.0);
+}
+"""
+
+segmentation_vertex_shader = """
+#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+layout (location = 2) in vec2 aTexCoord;
+
+// column vectors of the instance transform matrix
+layout (location = 3) in vec4 aInstanceTransform0;
+layout (location = 4) in vec4 aInstanceTransform1;
+layout (location = 5) in vec4 aInstanceTransform2;
+layout (location = 6) in vec4 aInstanceTransform3;
+
+uniform mat4 view;
+uniform mat4 model;
+uniform mat4 projection;
+
+void main()
+{
+    mat4 transform = model * mat4(aInstanceTransform0, aInstanceTransform1, aInstanceTransform2, aInstanceTransform3);
+    vec4 worldPos = transform * vec4(aPos, 1.0);
+    gl_Position = projection * view * worldPos;
+
+}
+"""
+
+segmentation_fragment_shader = """
+#version 330 core
+out vec4 FragColor;
+
+uniform float meshId;
+
+void main()
+{
+    FragColor = vec4(meshId, meshId, meshId, 1.0);
 }
 """
 
@@ -233,9 +270,9 @@ out vec4 FragColor;
 uniform sampler2D textureSampler;
 
 vec3 bourkeColorMap(float v) {
-    vec3 c = vec3(1.0, 1.0, 1.0);
+    vec3 c = vec3(v, v, v);
 
-    v = clamp(v, 0.0, 1.0); // Ensures v is between 0 and 1
+    /* v = clamp(v, 0.0, 1.0); // Ensures v is between 0 and 1
 
     if (v < 0.25) {
         c.r = 0.0;
@@ -250,15 +287,33 @@ vec3 bourkeColorMap(float v) {
         c.g = 1.0 + 4.0 * (0.75 - v);
         c.b = 0.0;
     }
+    */
 
     return c;
 }
 
 void main() {
     float depth = texture(textureSampler, TexCoord).r;
-    FragColor = vec4(bourkeColorMap(sqrt(1.0 - depth)), 1.0);
+    FragColor = vec4(depth, depth, depth, 1.0);
 }
 """
+
+def tab10_color_map(i):
+    # matplotlib "tab10" colors
+    colors = [
+        [31, 119, 180],
+        [255, 127, 14],
+        [44, 160, 44],
+        [214, 39, 40],
+        [148, 103, 189],
+        [140, 86, 75],
+        [227, 119, 194],
+        [127, 127, 127],
+        [188, 189, 34],
+        [23, 190, 207],
+    ]
+    num_colors = len(colors)
+    return [c / 255.0 for c in colors[i % num_colors]]
 
 
 @wp.kernel
@@ -470,24 +525,6 @@ def copy_rgb_frame(
 
 
 @wp.kernel
-def copy_rgb_frame_uint8(
-    input_img: wp.array(dtype=wp.uint8),
-    width: int,
-    height: int,
-    # outputs
-    output_img: wp.array(dtype=wp.uint8, ndim=3),
-):
-    w, v = wp.tid()
-    pixel = v * width + w
-    pixel *= 3
-    # flip vertically (OpenGL coordinates start at bottom)
-    v = height - v - 1
-    output_img[v, w, 0] = input_img[pixel + 0]
-    output_img[v, w, 1] = input_img[pixel + 1]
-    output_img[v, w, 2] = input_img[pixel + 2]
-
-
-@wp.kernel
 def copy_depth_frame(
     input_img: wp.array(dtype=wp.float32),
     width: int,
@@ -535,34 +572,6 @@ def copy_rgb_frame_tiles(
     output_img[tile, y, x, 0] = r / 255.0
     output_img[tile, y, x, 1] = g / 255.0
     output_img[tile, y, x, 2] = b / 255.0
-
-
-@wp.kernel
-def copy_rgb_frame_tiles_uint8(
-    input_img: wp.array(dtype=wp.uint8),
-    positions: wp.array(dtype=int, ndim=2),
-    screen_width: int,
-    screen_height: int,
-    tile_height: int,
-    # outputs
-    output_img: wp.array(dtype=wp.uint8, ndim=4),
-):
-    tile, x, y = wp.tid()
-    p = positions[tile]
-    qx = x + p[0]
-    qy = y + p[1]
-    pixel = qy * screen_width + qx
-    # flip vertically (OpenGL coordinates start at bottom)
-    y = tile_height - y - 1
-    if qx >= screen_width or qy >= screen_height:
-        output_img[tile, y, x, 0] = wp.uint8(0)
-        output_img[tile, y, x, 1] = wp.uint8(0)
-        output_img[tile, y, x, 2] = wp.uint8(0)
-        return  # prevent out-of-bounds access
-    pixel *= 3
-    output_img[tile, y, x, 0] = input_img[pixel + 0]
-    output_img[tile, y, x, 1] = input_img[pixel + 1]
-    output_img[tile, y, x, 2] = input_img[pixel + 2]
 
 
 @wp.kernel
@@ -623,34 +632,6 @@ def copy_rgb_frame_tile(
     output_img[tile, y, x, 2] = b / 255.0
 
 
-@wp.kernel
-def copy_rgb_frame_tile_uint8(
-    input_img: wp.array(dtype=wp.uint8),
-    offset_x: int,
-    offset_y: int,
-    screen_width: int,
-    screen_height: int,
-    tile_height: int,
-    # outputs
-    output_img: wp.array(dtype=wp.uint8, ndim=4),
-):
-    tile, x, y = wp.tid()
-    qx = x + offset_x
-    qy = y + offset_y
-    pixel = qy * screen_width + qx
-    # flip vertically (OpenGL coordinates start at bottom)
-    y = tile_height - y - 1
-    if qx >= screen_width or qy >= screen_height:
-        output_img[tile, y, x, 0] = wp.uint8(0)
-        output_img[tile, y, x, 1] = wp.uint8(0)
-        output_img[tile, y, x, 2] = wp.uint8(0)
-        return  # prevent out-of-bounds access
-    pixel *= 3
-    output_img[tile, y, x, 0] = input_img[pixel + 0]
-    output_img[tile, y, x, 1] = input_img[pixel + 1]
-    output_img[tile, y, x, 2] = input_img[pixel + 2]
-
-
 def check_gl_error():
     from pyglet import gl
 
@@ -666,7 +647,7 @@ class ShapeInstancer:
         [3D point, 3D normal, UV texture coordinates]
     """
 
-    def __init__(self, shape_shader, device):
+    def __init__(self, shape_shader, mesh_id, device):
         self.shape_shader = shape_shader
         self.device = device
         self.face_count = 0
@@ -799,9 +780,7 @@ class ShapeInstancer:
             )
         else:
             self.instance_transforms = wp.array(
-                [(*pos, *rot) for pos, rot in zip(positions, rotations)],
-                dtype=wp.transform,
-                device=self.device,
+                [(*pos, *rot) for pos, rot in zip(positions, rotations, strict=False)], dtype=wp.transform, device=self.device
             )
 
         if scalings is None:
@@ -919,6 +898,8 @@ class ShapeInstancer:
 def str_buffer(string: str):
     return ctypes.c_char_p(string.encode("utf-8"))
 
+def float_c(f: float):
+    return (ctypes.c_float * 1)(f)
 
 def arr_pointer(arr: np.ndarray):
     return arr.astype(np.float32).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
@@ -934,7 +915,7 @@ class OpenGLRenderer:
 
     def __init__(
         self,
-        title="Warp",
+        title="Warp sim",
         scaling=1.0,
         fps=60,
         up_axis="Y",
@@ -953,59 +934,14 @@ class OpenGLRenderer:
         show_info=True,
         render_wireframe=False,
         render_depth=False,
+        render_seg=False,
         axis_scale=1.0,
         vsync=False,
-        headless=None,
+        headless=False,
         enable_backface_culling=True,
         enable_mouse_interaction=True,
         enable_keyboard_interaction=True,
     ):
-        """
-        Args:
-
-            title (str): The window title.
-            scaling (float): The scaling factor for the scene.
-            fps (int): The target frames per second.
-            up_axis (str): The up axis of the scene. Can be "X", "Y", or "Z".
-            screen_width (int): The width of the window.
-            screen_height (int): The height of the window.
-            near_plane (float): The near clipping plane.
-            far_plane (float): The far clipping plane.
-            camera_fov (float): The camera field of view in degrees.
-            camera_pos (tuple): The initial camera position.
-            camera_front (tuple): The initial camera front direction.
-            camera_up (tuple): The initial camera up direction.
-            background_color (tuple): The background color of the scene.
-            draw_grid (bool): Whether to draw a grid indicating the ground plane.
-            draw_sky (bool): Whether to draw a sky sphere.
-            draw_axis (bool): Whether to draw the coordinate system axes.
-            show_info (bool): Whether to overlay rendering information.
-            render_wireframe (bool): Whether to render scene shapes as wireframes.
-            render_depth (bool): Whether to show the depth buffer instead of the RGB image.
-            axis_scale (float): The scale of the coordinate system axes being rendered (only if ``draw_axis`` is True).
-            vsync (bool): Whether to enable vertical synchronization.
-            headless (bool): Whether to run in headless mode (no window is created). If None, the value is determined by the Pyglet configuration defined in ``pyglet.options["headless"]``.
-            enable_backface_culling (bool): Whether to enable backface culling.
-            enable_mouse_interaction (bool): Whether to enable mouse interaction.
-            enable_keyboard_interaction (bool): Whether to enable keyboard interaction.
-
-        Note:
-
-            :class:`OpenGLRenderer` requires Pyglet (version >= 2.0, known to work on 2.0.7) to be installed.
-
-            Headless rendering is supported via EGL on UNIX operating systems. To enable headless rendering, set the following pyglet options before importing ``warp.render``:
-
-            .. code-block:: python
-
-                import pyglet
-
-                pyglet.options["headless"] = True
-
-                import warp.render
-
-                # OpenGLRenderer is instantiated with headless=True by default
-                renderer = warp.render.OpenGLRenderer()
-        """
         try:
             import pyglet
 
@@ -1015,8 +951,8 @@ class OpenGLRenderer:
             from pyglet import gl
             from pyglet.graphics.shader import Shader, ShaderProgram
             from pyglet.math import Vec3 as PyVec3
-        except ImportError as e:
-            raise Exception("OpenGLRenderer requires pyglet (version >= 2.0) to be installed.") from e
+        except ImportError:
+            raise Exception("OpenGLRenderer requires pyglet (version >= 2.0) to be installed.")
 
         self.camera_near_plane = near_plane
         self.camera_far_plane = far_plane
@@ -1037,15 +973,10 @@ class OpenGLRenderer:
         self.window = pyglet.window.Window(
             width=screen_width, height=screen_height, caption=title, resizable=True, vsync=vsync, visible=not headless
         )
-        if headless is None:
-            self.headless = pyglet.options.get("headless", False)
-        else:
-            self.headless = headless
         self.app = pyglet.app
 
-        if not headless:
-            # making window current opengl rendering context
-            self.window.switch_to()
+        # making window current opengl rendering context
+        self.window.switch_to()
 
         self.screen_width, self.screen_height = self.window.get_framebuffer_size()
 
@@ -1136,16 +1067,15 @@ class OpenGLRenderer:
         self._frame_fbo = None
         self._frame_pbo = None
 
-        if not headless:
-            self.window.push_handlers(on_draw=self._draw)
-            self.window.push_handlers(on_resize=self._window_resize_callback)
-            self.window.push_handlers(on_key_press=self._key_press_callback)
+        self.window.push_handlers(on_draw=self._draw)
+        self.window.push_handlers(on_resize=self._window_resize_callback)
+        self.window.push_handlers(on_key_press=self._key_press_callback)
 
-            self._key_handler = pyglet.window.key.KeyStateHandler()
-            self.window.push_handlers(self._key_handler)
+        self._key_handler = pyglet.window.key.KeyStateHandler()
+        self.window.push_handlers(self._key_handler)
 
-            self.window.on_mouse_scroll = self._scroll_callback
-            self.window.on_mouse_drag = self._mouse_drag_callback
+        self.window.on_mouse_scroll = self._scroll_callback
+        self.window.on_mouse_drag = self._mouse_drag_callback
 
         gl.glClearColor(*self.background_color, 1)
         gl.glEnable(gl.GL_DEPTH_TEST)
@@ -1267,7 +1197,7 @@ class OpenGLRenderer:
         vertices, indices = self._create_arrow_mesh(
             base_radius=0.02 * axis_scale, base_height=0.85 * axis_scale, cap_height=0.15 * axis_scale
         )
-        self._axis_instancer = ShapeInstancer(self._shape_shader, self._device)
+        self._axis_instancer = ShapeInstancer(self._shape_shader, mesh_id = None, device = self._device)
         self._axis_instancer.register_shape(vertices, indices)
         sqh = np.sqrt(0.5)
         self._axis_instancer.allocate_instances(
@@ -1282,6 +1212,7 @@ class OpenGLRenderer:
         self._frame_depth_texture = None
         self._frame_fbo = None
         self._setup_framebuffer()
+
 
         # fmt: off
         # set up VBO for the quad that is rendered to the user window with the texture
@@ -1358,21 +1289,20 @@ class OpenGLRenderer:
             width=400,
         )
 
-        if not headless:
-            # set up our own event handling so we can synchronously render frames
-            # by calling update() in a loop
-            from pyglet.window import Window
+        # set up our own event handling so we can synchronously render frames
+        # by calling update() in a loop
+        from pyglet.window import Window
 
-            Window._enable_event_queue = False
+        Window._enable_event_queue = False
 
-            self.window.switch_to()
-            self.window.dispatch_pending_events()
+        self.window.switch_to()
+        self.window.dispatch_pending_events()
 
-            platform_event_loop = self.app.platform_event_loop
-            platform_event_loop.start()
+        platform_event_loop = self.app.platform_event_loop
+        platform_event_loop.start()
 
-            # start event loop
-            self.app.event_loop.dispatch_event("on_enter")
+        # start event loop
+        self.app.event_loop.dispatch_event("on_enter")
 
     @property
     def paused(self):
@@ -1393,9 +1323,8 @@ class OpenGLRenderer:
     def clear(self):
         from pyglet import gl
 
-        if not self.headless:
-            self.app.event_loop.dispatch_event("on_exit")
-            self.app.platform_event_loop.stop()
+        self.app.event_loop.dispatch_event("on_exit")
+        self.app.platform_event_loop.stop()
 
         if self._instance_transform_gl_buffer is not None:
             try:
@@ -1404,7 +1333,7 @@ class OpenGLRenderer:
                 gl.glDeleteBuffers(1, self._instance_color2_buffer)
             except gl.GLException:
                 pass
-        for vao, vbo, ebo, _, _vertex_cuda_buffer in self._shape_gl_buffers.values():
+        for vao, vbo, ebo, _, _ in self._shape_gl_buffers.values():
             try:
                 gl.glDeleteVertexArrays(1, vao)
                 gl.glDeleteBuffers(1, vbo)
@@ -1462,8 +1391,7 @@ class OpenGLRenderer:
         """
         Set up tiled rendering where the render buffer is split into multiple tiles that can visualize
         different shape instances of the scene with different view and projection matrices.
-        See :meth:`get_pixels` which allows to retrieve the pixels of for each tile.
-        See :meth:`update_tile` which allows to update the shape instances, projection matrix, view matrix, tile size, or tile position for a given tile.
+        See `get_pixels` which allows to retrieve the pixels of for each tile.
 
         :param instances: A list of lists of shape instance ids. Each list of shape instance ids
             will be rendered into a separate tile.
@@ -1518,13 +1446,13 @@ class OpenGLRenderer:
             self._tile_nrows = None
             self._tile_width = None
             self._tile_height = None
-            if all(tile_sizes[i][0] == tile_sizes[0][0] for i in range(n)):
+            if all([tile_sizes[i][0] == tile_sizes[0][0] for i in range(n)]):
                 # tiles all have the same width
                 self._tile_width = tile_sizes[0][0]
-            if all(tile_sizes[i][1] == tile_sizes[0][1] for i in range(n)):
+            if all([tile_sizes[i][1] == tile_sizes[0][1] for i in range(n)]):
                 # tiles all have the same height
                 self._tile_height = tile_sizes[0][1]
-            self._tile_viewports = [(x, y, w, h) for (x, y), (w, h) in zip(tile_positions, tile_sizes)]
+            self._tile_viewports = [(x, y, w, h) for (x, y), (w, h) in zip(tile_positions, tile_sizes, strict=False)]
 
         if projection_matrices is None:
             projection_matrices = [None] * n
@@ -1567,7 +1495,6 @@ class OpenGLRenderer:
         :param tile_size: A (width, height) tuple specifying the size of the tile in pixels (optional).
         :param tile_position: A (x, y) tuple specifying the position of the tile in pixels (optional).
         """
-
         assert self._tile_instances is not None, "Tiled rendering is not set up. Call setup_tiled_rendering first."
         assert tile_id < len(self._tile_instances), "Invalid tile id."
 
@@ -1645,7 +1572,7 @@ class OpenGLRenderer:
             )
 
             if gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER) != gl.GL_FRAMEBUFFER_COMPLETE:
-                print("Framebuffer is not complete!", flush=True)
+                print("Framebuffer is not complete!")
                 gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
                 sys.exit(1)
 
@@ -1719,20 +1646,8 @@ class OpenGLRenderer:
     def camera_up(self, value):
         self.update_view_matrix(cam_up=value)
 
-    def compute_view_matrix(self, cam_pos, cam_front, cam_up):
-        from pyglet.math import Mat4, Vec3
-
-        model = np.array(self._model_matrix).reshape((4, 4))
-        cp = model @ np.array([*cam_pos / self._scaling, 1.0])
-        cf = model @ np.array([*cam_front / self._scaling, 1.0])
-        up = model @ np.array([*cam_up / self._scaling, 0.0])
-        cp = Vec3(*cp[:3])
-        cf = Vec3(*cf[:3])
-        up = Vec3(*up[:3])
-        return np.array(Mat4.look_at(cp, cp + cf, up), dtype=np.float32)
-
     def update_view_matrix(self, cam_pos=None, cam_front=None, cam_up=None, stiffness=1.0):
-        from pyglet.math import Vec3
+        from pyglet.math import Mat4, Vec3
 
         if cam_pos is not None:
             self._camera_pos = self._camera_pos * (1.0 - stiffness) + Vec3(*cam_pos) * stiffness
@@ -1741,16 +1656,22 @@ class OpenGLRenderer:
         if cam_up is not None:
             self._camera_up = self._camera_up * (1.0 - stiffness) + Vec3(*cam_up) * stiffness
 
-        self._view_matrix = self.compute_view_matrix(self._camera_pos, self._camera_front, self._camera_up)
+        model = np.array(self._model_matrix).reshape((4, 4))
+        cp = model @ np.array([*self._camera_pos / self._scaling, 1.0])
+        cf = model @ np.array([*self._camera_front / self._scaling, 1.0])
+        up = model @ np.array([*self._camera_up / self._scaling, 0.0])
+        cp = Vec3(*cp[:3])
+        cf = Vec3(*cf[:3])
+        up = Vec3(*up[:3])
+        self._view_matrix = np.array(Mat4.look_at(cp, cp + cf, up))
 
-    @staticmethod
-    def compute_model_matrix(camera_axis: int, scaling: float):
+    def compute_model_matrix(self, camera_axis: int, scaling: float):
         if camera_axis == 0:
-            return np.array((0, 0, scaling, 0, scaling, 0, 0, 0, 0, scaling, 0, 0, 0, 0, 0, 1), dtype=np.float32)
+            return np.array((0, 0, scaling, 0, scaling, 0, 0, 0, 0, scaling, 0, 0, 0, 0, 0, 1))
         elif camera_axis == 2:
-            return np.array((-scaling, 0, 0, 0, 0, 0, scaling, 0, 0, scaling, 0, 0, 0, 0, 0, 1), dtype=np.float32)
+            return np.array((-scaling, 0, 0, 0, 0, 0, scaling, 0, 0, scaling, 0, 0, 0, 0, 0, 1))
 
-        return np.array((scaling, 0, 0, 0, 0, scaling, 0, 0, 0, 0, scaling, 0, 0, 0, 0, 1), dtype=np.float32)
+        return np.array((scaling, 0, 0, 0, 0, scaling, 0, 0, 0, 0, scaling, 0, 0, 0, 0, 1))
 
     def update_model_matrix(self, model_matrix: Optional[Mat44] = None):
         from pyglet import gl
@@ -1819,8 +1740,8 @@ class OpenGLRenderer:
         self._last_time = self.clock_time
         self._frame_speed = update_duration * 100.0
 
-        if not self.headless:
-            self.app.platform_event_loop.step(self._frame_dt * 1e-3)
+        # self.app.event_loop.idle()
+        self.app.platform_event_loop.step(self._frame_dt * 1e-3)
 
         if not self.skip_rendering:
             self._skip_frame_counter += 1
@@ -1840,17 +1761,13 @@ class OpenGLRenderer:
                     update = 1.0 / update_duration
                     self._fps_render = (1.0 - self._fps_alpha) * self._fps_render + self._fps_alpha * update
 
-            if not self.headless:
-                self.app.event_loop._redraw_windows(self._frame_dt * 1e-3)
-            else:
-                self._draw()
+            self.app.event_loop._redraw_windows(self._frame_dt * 1e-3)
 
     def _draw(self):
         from pyglet import gl
 
-        if not self.headless:
-            # catch key hold events
-            self._process_inputs()
+        # catch key hold events
+        self._process_inputs()
 
         if self.enable_backface_culling:
             gl.glEnable(gl.GL_CULL_FACE)
@@ -1894,31 +1811,6 @@ class OpenGLRenderer:
 
         gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, 0)
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
-        gl.glViewport(0, 0, self.screen_width, self.screen_height)
-
-        # render frame buffer texture to screen
-        if self._frame_fbo is not None:
-            if self.render_depth:
-                with self._frame_depth_shader:
-                    gl.glActiveTexture(gl.GL_TEXTURE0)
-                    gl.glBindTexture(gl.GL_TEXTURE_2D, self._frame_depth_texture)
-                    gl.glUniform1i(self._frame_loc_depth_texture, 0)
-
-                    gl.glBindVertexArray(self._frame_vao)
-                    gl.glDrawElements(gl.GL_TRIANGLES, len(self._frame_indices), gl.GL_UNSIGNED_INT, None)
-                    gl.glBindVertexArray(0)
-                    gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
-            else:
-                with self._frame_shader:
-                    gl.glActiveTexture(gl.GL_TEXTURE0)
-                    gl.glBindTexture(gl.GL_TEXTURE_2D, self._frame_texture)
-                    gl.glUniform1i(self._frame_loc_texture, 0)
-
-                    gl.glBindVertexArray(self._frame_vao)
-                    gl.glDrawElements(gl.GL_TRIANGLES, len(self._frame_indices), gl.GL_UNSIGNED_INT, None)
-                    gl.glBindVertexArray(0)
-                    gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
 
         # check for OpenGL errors
         # check_gl_error()
@@ -1999,9 +1891,11 @@ Instances: {len(self._instances)}"""
 
         for i, viewport in enumerate(self._tile_viewports):
             projection_matrix_ptr = arr_pointer(self._tile_projection_matrices[i])
-            view_matrix_ptr = arr_pointer(
-                self._tile_view_matrices[i] if self._tile_view_matrices[i] is not None else self._view_matrix
-            )
+            if self._tile_view_matrices[i] is not None:
+                view_matrix_ptr = arr_pointer(self._tile_view_matrices[i])
+            else:
+                view_matrix_ptr = arr_pointer(self._view_matrix)
+            # view_matrix_ptr = arr_pointer(self._tile_view_matrices[i] or self._view_matrix)
 
             gl.glViewport(*viewport)
             if self.draw_grid:
@@ -2016,6 +1910,7 @@ Instances: {len(self._instances)}"""
                 gl.glUniformMatrix4fv(self._loc_sky_view, 1, gl.GL_FALSE, view_matrix_ptr)
                 self._draw_sky(is_tiled=True)
 
+            # Draw the regular shape
             gl.glUseProgram(self._shape_shader.id)
             gl.glUniformMatrix4fv(self._loc_shape_projection, 1, gl.GL_FALSE, projection_matrix_ptr)
             gl.glUniformMatrix4fv(self._loc_shape_view, 1, gl.GL_FALSE, view_matrix_ptr)
@@ -2033,12 +1928,6 @@ Instances: {len(self._instances)}"""
                 gl.glDrawElementsInstancedBaseInstance(
                     gl.GL_TRIANGLES, tri_count, gl.GL_UNSIGNED_INT, None, 1, start_instance_idx
                 )
-
-            if self.draw_axis:
-                self._axis_instancer.render()
-
-            for instancer in self._shape_instancers.values():
-                instancer.render()
 
         gl.glBindVertexArray(0)
 
@@ -2102,7 +1991,7 @@ Instances: {len(self._instances)}"""
         import pyglet
 
         if not self.enable_keyboard_interaction:
-            return
+            return None
 
         for cb in self._key_callbacks:
             if cb(symbol, modifiers) == pyglet.event.EVENT_HANDLED:
@@ -2182,7 +2071,6 @@ Instances: {len(self._instances)}"""
         gl.glBindVertexArray(0)
 
         self._shape_gl_buffers[shape] = (vao, vbo, ebo, len(indices), vertex_cuda_buffer)
-
         return shape
 
     def add_shape_instance(
@@ -2217,7 +2105,7 @@ Instances: {len(self._instances)}"""
 
         colors1, colors2 = [], []
         all_instances = list(self._instances.values())
-        for _shape, instances in self._shape_instances.items():
+        for shape, instances in self._shape_instances.items():
             for i in instances:
                 if i >= len(all_instances):
                     continue
@@ -2285,7 +2173,7 @@ Instances: {len(self._instances)}"""
         inverse_instance_ids = {}
         instance_count = 0
         colors_size = np.zeros(3, dtype=np.float32).nbytes
-        for shape, (vao, _vbo, _ebo, _tri_count, _vertex_cuda_buffer) in self._shape_gl_buffers.items():
+        for shape, (vao, vbo, ebo, tri_count, vertex_cuda_buffer) in self._shape_gl_buffers.items():
             gl.glBindVertexArray(vao)
 
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._instance_transform_gl_buffer)
@@ -2348,14 +2236,21 @@ Instances: {len(self._instances)}"""
                 new_tf[:3] = pos
             if rot is not None:
                 new_tf[3:] = rot
+            new_color1 = old_color1
+            if color1 is not None:
+                new_color1 = color1
+            new_color2 = old_color2
+            if color2 is not None:
+                new_color2 = color2
+
             self._instances[name] = (
                 i,
                 body,
                 shape,
                 new_tf,
                 scale,
-                color1 or old_color1,
-                color2 or old_color2,
+                new_color1,
+                new_color2,
                 visible,
             )
             self._update_shape_instances = True
@@ -2430,7 +2325,10 @@ Instances: {len(self._instances)}"""
             self.clear()
             self.app.event_loop.exit()
 
-    def get_pixels(self, target_image: wp.array, split_up_tiles=True, mode="rgb", use_uint8=False):
+
+    def get_all_pixels(
+        self, rgb_image: wp.array, depth_image: wp.array, split_up_tiles=True
+        ):
         """
         Read the pixels from the frame buffer (RGB or depth are supported) into the given array.
 
@@ -2440,153 +2338,101 @@ Instances: {len(self._instances)}"""
         array must be of shape (num_tiles, tile_height, tile_width, 3) for RGB mode or (num_tiles, tile_height, tile_width, 1) for depth mode.
 
         Args:
-            target_image (array): The array to read the pixels into. Must have float32 as dtype and be on a CUDA device.
+            rgb_image: Array of shape (screen_height, screen_width, 3) or (num_tiles, tile_height, tile_width, 3) to
+                         read rgb pixels into. Must have float32 as dtype and be on a CUDA device.
+            depth_image: Array of shape (screen_height, screen_width, 1) or (num_tiles, tile_height, tile_width, 1) to
+                         read depth pixels into. Must have float32 as dtype and be on a CUDA device.
             split_up_tiles (bool): Whether to split up the viewport into tiles, see :meth:`setup_tiled_rendering`.
             mode (str): can be either "rgb" or "depth"
-            use_uint8 (bool): Whether to use uint8 as dtype in RGB mode for the target_image array and return values in the range [0, 255]. Otherwise, float32 is assumed as dtype with values in the range [0, 1].
 
         Returns:
             bool: Whether the pixels were successfully read.
         """
         from pyglet import gl
 
-        channels = 3 if mode == "rgb" else 1
-
-        if split_up_tiles:
-            assert (
-                self._tile_width is not None and self._tile_height is not None
-            ), "Tile width and height are not set, tiles must all have the same size"
-            assert all(
-                vp[2] == self._tile_width for vp in self._tile_viewports
-            ), "Tile widths do not all equal global tile_width, use `get_tile_pixels` instead to retrieve pixels for a single tile"
-            assert all(
-                vp[3] == self._tile_height for vp in self._tile_viewports
-            ), "Tile heights do not all equal global tile_height, use `get_tile_pixels` instead to retrieve pixels for a single tile"
-            assert (
-                target_image.shape
-                == (
-                    self.num_tiles,
-                    self._tile_height,
-                    self._tile_width,
-                    channels,
-                )
-            ), f"Shape of `target_image` array does not match {self.num_tiles} x {self._tile_height} x {self._tile_width} x {channels}"
-        else:
-            assert target_image.shape == (
-                self.screen_height,
-                self.screen_width,
-                channels,
-            ), f"Shape of `target_image` array does not match {self.screen_height} x {self.screen_width} x {channels}"
-
+        # First get and copy the frame texture of the rgb version
         gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, self._frame_pbo)
-        if mode == "rgb":
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self._frame_texture)
-        if mode == "depth":
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self._frame_depth_texture)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self._frame_texture)
         try:
-            # read screen texture into PBO
-            if mode == "rgb":
-                gl.glGetTexImage(gl.GL_TEXTURE_2D, 0, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, ctypes.c_void_p(0))
-            elif mode == "depth":
-                gl.glGetTexImage(gl.GL_TEXTURE_2D, 0, gl.GL_DEPTH_COMPONENT, gl.GL_FLOAT, ctypes.c_void_p(0))
+            gl.glGetTexImage(gl.GL_TEXTURE_2D, 0, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, ctypes.c_void_p(0))
         except gl.GLException:
             # this can happen if the window is closed/being moved to a different display
             gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
             gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, 0)
-            return False
+            return None
         gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
         gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, 0)
 
-        pbo_buffer = wp.RegisteredGLBuffer(int(self._frame_pbo.value), self._device, wp.RegisteredGLBuffer.READ_ONLY)
+        pbo_buffer = wp.RegisteredGLBuffer(
+            int(self._frame_pbo.value), self._device, wp.RegisteredGLBuffer.WRITE_DISCARD
+        )
         screen_size = self.screen_height * self.screen_width
-        if mode == "rgb":
-            img = pbo_buffer.map(dtype=wp.uint8, shape=(screen_size * channels))
-        elif mode == "depth":
-            img = pbo_buffer.map(dtype=wp.float32, shape=(screen_size * channels))
-        img = img.to(target_image.device)
+        img = pbo_buffer.map(dtype=wp.uint8, shape=(screen_size * 3))
+        img = img.to(rgb_image.device)
         if split_up_tiles:
-            positions = wp.array(self._tile_viewports, ndim=2, dtype=wp.int32, device=target_image.device)
-            if mode == "rgb":
-                wp.launch(
-                    copy_rgb_frame_tiles_uint8 if use_uint8 else copy_rgb_frame_tiles,
-                    dim=(self.num_tiles, self._tile_width, self._tile_height),
-                    inputs=[img, positions, self.screen_width, self.screen_height, self._tile_height],
-                    outputs=[target_image],
-                    device=target_image.device,
-                )
-            elif mode == "depth":
-                wp.launch(
-                    copy_depth_frame_tiles,
-                    dim=(self.num_tiles, self._tile_width, self._tile_height),
-                    inputs=[
-                        img,
-                        positions,
-                        self.screen_width,
-                        self.screen_height,
-                        self._tile_height,
-                        self.camera_near_plane,
-                        self.camera_far_plane,
-                    ],
-                    outputs=[target_image],
-                    device=target_image.device,
-                )
+            positions = wp.array(self._tile_viewports, ndim=2, dtype=wp.int32, device=rgb_image.device)
+            wp.launch(
+                copy_rgb_frame_tiles,
+                dim=(self.num_tiles, self._tile_width, self._tile_height),
+                inputs=[img, positions, self.screen_width, self.screen_height, self._tile_height],
+                outputs=[rgb_image],
+                device=rgb_image.device,
+            )
         else:
-            if mode == "rgb":
-                wp.launch(
-                    copy_rgb_frame_uint8 if use_uint8 else copy_rgb_frame,
-                    dim=(self.screen_width, self.screen_height),
-                    inputs=[img, self.screen_width, self.screen_height],
-                    outputs=[target_image],
-                    device=target_image.device,
-                )
-            elif mode == "depth":
-                wp.launch(
-                    copy_depth_frame,
-                    dim=(self.screen_width, self.screen_height),
-                    inputs=[img, self.screen_width, self.screen_height, self.camera_near_plane, self.camera_far_plane],
-                    outputs=[target_image],
-                    device=target_image.device,
-                )
+            wp.launch(
+                copy_rgb_frame,
+                dim=(self.screen_width, self.screen_height),
+                inputs=[img, self.screen_width, self.screen_height],
+                outputs=[rgb_image],
+                device=rgb_image.device,
+            )
+        pbo_buffer.unmap()
+
+        # Get a copy of the depth texture
+        gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, self._frame_pbo)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self._frame_depth_texture)
+        try:
+            gl.glGetTexImage(gl.GL_TEXTURE_2D, 0, gl.GL_DEPTH_COMPONENT, gl.GL_FLOAT, ctypes.c_void_p(0))
+        except gl.GLException:
+            # this can happen if the window is closed/being moved to a different display
+            gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+            gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, 0)
+            return None
+        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+        gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, 0)
+        pbo_buffer = wp.RegisteredGLBuffer(
+            int(self._frame_pbo.value), self._device, wp.RegisteredGLBuffer.WRITE_DISCARD
+        )
+        screen_size = self.screen_height * self.screen_width
+        img = pbo_buffer.map(dtype=wp.float32, shape=(screen_size * 1))
+        img = img.to(depth_image.device)
+        if split_up_tiles:
+            positions = wp.array(self._tile_viewports, ndim=2, dtype=wp.int32, device=depth_image.device)
+            wp.launch(
+                copy_depth_frame_tiles,
+                dim=(self.num_tiles, self._tile_width, self._tile_height),
+                inputs=[
+                    img,
+                    positions,
+                    self.screen_width,
+                    self.screen_height,
+                    self._tile_height,
+                    self.camera_near_plane,
+                    self.camera_far_plane,
+                ],
+                outputs=[depth_image],
+                device=depth_image.device,
+            )
+        else:
+            wp.launch(
+                copy_depth_frame,
+                dim=(self.screen_width, self.screen_height),
+                inputs=[img, self.screen_width, self.screen_height, self.camera_near_plane, self.camera_far_plane],
+                outputs=[depth_image],
+                device=depth_image.device,
+            )
         pbo_buffer.unmap()
         return True
-
-    # def create_image_texture(self, file_path):
-    #     from PIL import Image
-    #     img = Image.open(file_path)
-    #     img_data = np.array(list(img.getdata()), np.uint8)
-    #     texture = glGenTextures(1)
-    #     glBindTexture(GL_TEXTURE_2D, texture)
-    #     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, img.width, img.height, 0, GL_RGB, GL_UNSIGNED_BYTE, img_data)
-    #     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
-    #     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
-    #     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-    #     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-    #     return texture
-
-    # def create_check_texture(self, color1=(0, 0.5, 1.0), color2=None, width=default_texture_size, height=default_texture_size):
-    #     if width == 1 and height == 1:
-    #         pixels = np.array([np.array(color1)*255], dtype=np.uint8)
-    #     else:
-    #         pixels = np.zeros((width, height, 3), dtype=np.uint8)
-    #         half_w = width // 2
-    #         half_h = height // 2
-    #         color1 = np.array(np.array(color1)*255, dtype=np.uint8)
-    #         pixels[0:half_w, 0:half_h] = color1
-    #         pixels[half_w:width, half_h:height] = color1
-    #         if color2 is None:
-    #             color2 = np.array(np.clip(np.array(color1, dtype=np.float32) + 50, 0, 255), dtype=np.uint8)
-    #         else:
-    #             color2 = np.array(np.array(color2)*255, dtype=np.uint8)
-    #         pixels[half_w:width, 0:half_h] = color2
-    #         pixels[0:half_w, half_h:height] = color2
-    #     texture = glGenTextures(1)
-    #     glBindTexture(GL_TEXTURE_2D, texture)
-    #     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, pixels.flatten())
-    #     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
-    #     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
-    #     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-    #     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-    #     return texture
 
     def render_plane(
         self,
@@ -2818,14 +2664,7 @@ Instances: {len(self._instances)}"""
         return shape
 
     def render_box(
-        self,
-        name: str,
-        pos: tuple,
-        rot: tuple,
-        extents: tuple,
-        parent_body: str = None,
-        is_template: bool = False,
-        color: tuple = None,
+        self, name: str, pos: tuple, rot: tuple, extents: tuple, parent_body: str = None, is_template: bool = False, color: tuple = None
     ):
         """Add a box for visualization
 
@@ -2881,11 +2720,11 @@ Instances: {len(self._instances)}"""
         points = np.array(points, dtype=np.float32) * np.array(scale, dtype=np.float32)
         indices = np.array(indices, dtype=np.int32).reshape((-1, 3))
         if name in self._instances:
-            self.update_shape_instance(name, pos, rot)
+            self.update_shape_instance(name, pos, rot, color1=colors)
             shape = self._instances[name][2]
             self.update_shape_vertices(shape, points)
-            return
-        geo_hash = hash((points.tobytes(), indices.tobytes(), colors.tobytes()))
+            return None
+        geo_hash = hash((name, points.tobytes(), indices.tobytes(), colors.tobytes()))
         if geo_hash in self._shape_geo_hash:
             shape = self._shape_geo_hash[geo_hash]
             if self.update_shape_instance(name, pos, rot):
@@ -2920,10 +2759,10 @@ Instances: {len(self._instances)}"""
                 )
                 gfx_vertices = gfx_vertices.numpy()
                 gfx_indices = np.arange(len(indices) * 3)
-            shape = self.register_shape(geo_hash, gfx_vertices, gfx_indices)
+            shape = self.register_shape(geo_hash, gfx_vertices, gfx_indices, color1=colors)
         if not is_template:
             body = self._resolve_body_id(parent_body)
-            self.add_shape_instance(name, shape, body, pos, rot)
+            self.add_shape_instance(name, shape, body, pos, rot, color1=colors)
         return shape
 
     def render_arrow(
@@ -2966,15 +2805,13 @@ Instances: {len(self._instances)}"""
             self.add_shape_instance(name, shape, body, pos, rot, color1=color, color2=color)
         return shape
 
-    def render_ref(self, name: str, path: str, pos: tuple, rot: tuple, scale: tuple, color: tuple = None):
+    def render_ref(self, name: str, path: str, pos: tuple, rot: tuple, scale: tuple):
         """
         Create a reference (instance) with the given name to the given path.
         """
 
         if path in self._instances:
             _, body, shape, _, original_scale, color1, color2 = self._instances[path]
-            if color is not None:
-                color1 = color2 = color
             self.add_shape_instance(name, shape, body, pos, rot, scale or original_scale, color1, color2)
             return
 
@@ -3353,4 +3190,5 @@ Instances: {len(self._instances)}"""
 
 
 if __name__ == "__main__":
+    wp.init()
     renderer = OpenGLRenderer()
